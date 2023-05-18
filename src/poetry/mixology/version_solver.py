@@ -140,6 +140,9 @@ class VersionSolver:
         ] = collections.defaultdict(set)
         self._solution = PartialSolution()
 
+        self.last_attempted_solution_count = -1
+        self.last_attempted_solution_timestamp = time.time()
+
     @property
     def solution(self) -> PartialSolution:
         return self._solution
@@ -286,7 +289,21 @@ class VersionSolver:
         self._log(f"conflict: {incompatibility}")
 
         new_incompatibility = False
+
         while not incompatibility.is_failure():
+            if self._solution.attempted_solutions > self.last_attempted_solution_count:
+                self.last_attempted_solution_count = self._solution.attempted_solutions
+                print(
+                    "{}: {}ms".format(
+                        self._solution.attempted_solutions,
+                        int(
+                            (time.time() - self.last_attempted_solution_timestamp)
+                            * 1000
+                        ),
+                    )
+                )
+                self.last_attempted_solution_timestamp = time.time()
+
             # The term in incompatibility.terms that was most recently satisfied by
             # _solution.
             most_recent_term = None
