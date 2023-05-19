@@ -30,6 +30,9 @@ if TYPE_CHECKING:
 
 _conflict = object()
 
+import os
+VERIFY_INCOMPATIBILITY_CACHE = os.environ.get("VERIFY_INCOMPATIBILITY_CACHE") == "1"
+
 
 DependencyCacheKey = Tuple[
     str, Optional[str], Optional[str], Optional[str], Optional[str]
@@ -126,6 +129,7 @@ class VersionSolver:
         self._contradicted_incompatibilities_by_level: dict[
             int, set[Incompatibility]
         ] = collections.defaultdict(set)
+        self._contradicted_incompatibilities_orig: set[Incompatibility] = set()
         self._solution = PartialSolution()
 
         self.last_attempted_solution_count = -1
@@ -177,10 +181,33 @@ class VersionSolver:
             # we can derive stronger assignments sooner and more eagerly find
             # conflicts.
             for incompatibility in reversed(self._incompatibilities[package]):
-                if incompatibility in self._contradicted_incompatibilities:
+                if incompatibility in self._contradicted_incompatibilities_orig:
                     continue
 
+                should_skip = incompatibility in self._contradicted_incompatibilities
+                would_have_skipped = False
+
+                if VERIFY_INCOMPATIBILITY_CACHE:
+                    if incompatibility in self._contradicted_incompatibilities_orig:
+                        # Old path says to skip, assert new path does too.
+                        assert should_skip, incompatibility
+                        continue
+
+                    would_have_skipped = should_skip
+                else:
+                    if should_skip:
+                        continue
+
                 result = self._propagate_incompatibility(incompatibility)
+
+                if would_have_skipped:
+                    # Old path said not to skip, new path says to skip. Assert
+                    # result is None and that it was added to
+                    # self._contradicted_incompatibilities_orig to ensure this
+                    # was indeed safe to skip.
+                    print("WOULD HAVE SKIPPED FOR INCOMPATIBILITY CACHE")
+                    assert result is None, result
+                    assert incompatibility in self._contradicted_incompatibilities_orig, incompatibility
 
                 if result is _conflict:
                     # If the incompatibility is satisfied by the solution, we use
@@ -230,6 +257,7 @@ class VersionSolver:
                 self._contradicted_incompatibilities_by_level[
                     self._solution.decision_level
                 ].add(incompatibility)
+                self._contradicted_incompatibilities_orig.add(incompatibility)
                 return None
             elif relation == SetRelation.OVERLAPPING:
                 # If more than one term is inconclusive, we can't deduce anything about
@@ -251,6 +279,7 @@ class VersionSolver:
         self._contradicted_incompatibilities_by_level[
             self._solution.decision_level
         ].add(incompatibility)
+        self._contradicted_incompatibilities_orig.add(incompatibility)
 
         adverb = "not " if unsatisfied.is_positive() else ""
         self._log(f"derived: {adverb}{unsatisfied.dependency}")
@@ -368,6 +397,7 @@ class VersionSolver:
                     self._dependency_cache.clear_level(level)
 
                 self._solution.backtrack(previous_satisfier_level)
+                self._contradicted_incompatibilities_orig.clear()
                 if new_incompatibility:
                     self._add_incompatibility(incompatibility)
 
