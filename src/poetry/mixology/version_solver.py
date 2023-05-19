@@ -32,6 +32,7 @@ _conflict = object()
 
 import os
 VERIFY_INCOMPATIBILITY_CACHE = os.environ.get("VERIFY_INCOMPATIBILITY_CACHE") == "1"
+VERIFY_DEPENDENCY_CACHE = os.environ.get("VERIFY_DEPENDENCY_CACHE") == "1"
 
 
 DependencyCacheKey = Tuple[
@@ -111,6 +112,50 @@ class DependencyCache:
                 self.cache[key].pop()
 
 
+class DependencyCacheOrig:
+    """
+    A cache of the valid dependencies.
+
+    The key observation here is that during the search - except at backtracking
+    - once we have decided that a dependency is invalid, we never need check it
+    again.
+    """
+
+    def __init__(self, provider: Provider) -> None:
+        self.provider = provider
+        self.cache: dict[
+            tuple[str, str | None, str | None, str | None, str | None],
+            list[DependencyPackage],
+        ] = {}
+
+        self.search_for = functools.lru_cache(maxsize=128)(self._search_for)
+
+    def _search_for(self, dependency: Dependency) -> list[DependencyPackage]:
+        key = (
+            dependency.complete_name,
+            dependency.source_type,
+            dependency.source_url,
+            dependency.source_reference,
+            dependency.source_subdirectory,
+        )
+
+        packages = self.cache.get(key)
+        if packages is None:
+            packages = self.provider.search_for(dependency)
+        else:
+            packages = [
+                p for p in packages if dependency.constraint.allows(p.package.version)
+            ]
+
+        self.cache[key] = packages
+
+        return packages
+
+    def clear(self) -> None:
+        self.cache.clear()
+
+
+
 class VersionSolver:
     """
     The version solver that finds a set of package versions that satisfy the
@@ -124,6 +169,7 @@ class VersionSolver:
         self._root = root
         self._provider = provider
         self._dependency_cache = DependencyCache(provider)
+        self._dependency_cache_orig = DependencyCacheOrig(provider)
         self._incompatibilities: dict[str, list[Incompatibility]] = {}
         self._contradicted_incompatibilities: set[Incompatibility] = set()
         self._contradicted_incompatibilities_by_level: dict[
@@ -398,6 +444,7 @@ class VersionSolver:
 
                 self._solution.backtrack(previous_satisfier_level)
                 self._contradicted_incompatibilities_orig.clear()
+                self._dependency_cache_orig.clear()
                 if new_incompatibility:
                     self._add_incompatibility(incompatibility)
 
@@ -500,6 +547,12 @@ class VersionSolver:
                     dependency, self._solution.decision_level
                 )
             )
+            if VERIFY_DEPENDENCY_CACHE:
+                num_packages_orig = len(
+                    self._dependency_cache_orig.search_for(dependency)
+                )
+                print("VERIFY DEPENDENCY CACHE 1")
+                assert num_packages == num_packages_orig, (num_packages, num_packages_orig)
 
             if num_packages < 2:
                 preference = Preference.NO_CHOICE
@@ -519,6 +572,11 @@ class VersionSolver:
             packages = self._dependency_cache.search_for(
                 dependency, self._solution.decision_level
             )
+            if VERIFY_DEPENDENCY_CACHE:
+                packages_orig = self._dependency_cache_orig.search_for(dependency)
+                print("VERIFY DEPENDENCY CACHE 2")
+                assert packages == packages_orig, (packages, packages_orig)
+
             package = next(iter(packages), None)
 
             if package is None:
