@@ -41,13 +41,18 @@ class DependencyCache:
     def __init__(self, provider: Provider) -> None:
         self.provider = provider
         self.cache: dict[
-            tuple[str, str | None, str | None, str | None, str | None],
-            list[DependencyPackage],
-        ] = {}
+            int,
+            dict[
+                tuple[str, str | None, str | None, str | None, str | None],
+                list[DependencyPackage],
+            ],
+        ] = collections.defaultdict(dict)
 
         self.search_for = functools.lru_cache(maxsize=128)(self._search_for)
 
-    def _search_for(self, dependency: Dependency) -> list[DependencyPackage]:
+    def _search_for(
+        self, dependency: Dependency, level: int
+    ) -> list[DependencyPackage]:
         key = (
             dependency.complete_name,
             dependency.source_type,
@@ -56,20 +61,25 @@ class DependencyCache:
             dependency.source_subdirectory,
         )
 
-        packages = self.cache.get(key)
-        if packages is None:
-            packages = self.provider.search_for(dependency)
+        for check_level in range(level, -1, -1):
+            packages = self.cache[check_level].get(key)
+            if packages is not None:
+                packages = [
+                    p
+                    for p in packages
+                    if dependency.constraint.allows(p.package.version)
+                ]
+                break
         else:
-            packages = [
-                p for p in packages if dependency.constraint.allows(p.package.version)
-            ]
+            packages = self.provider.search_for(dependency)
 
-        self.cache[key] = packages
+        self.cache[level][key] = packages
 
         return packages
 
-    def clear(self) -> None:
-        self.cache.clear()
+    def clear_level(self, level: int) -> None:
+        self.search_for.cache_clear()
+        self.cache.pop(level, None)
 
 
 class VersionSolver:
@@ -326,9 +336,9 @@ class VersionSolver:
                     self._solution.decision_level, previous_satisfier_level, -1
                 ):
                     self._contradicted_incompatibilities.pop(level, None)
+                    self._dependency_cache.clear_level(level)
 
                 self._solution.backtrack(previous_satisfier_level)
-                self._dependency_cache.clear()
                 if new_incompatibility:
                     self._add_incompatibility(incompatibility)
 
@@ -426,7 +436,11 @@ class VersionSolver:
                 if locked:
                     return is_specific_marker, Preference.LOCKED, 1
 
-            num_packages = len(self._dependency_cache.search_for(dependency))
+            num_packages = len(
+                self._dependency_cache.search_for(
+                    dependency, self._solution.decision_level
+                )
+            )
 
             if num_packages < 2:
                 preference = Preference.NO_CHOICE
@@ -443,7 +457,9 @@ class VersionSolver:
 
         locked = self._provider.get_locked(dependency)
         if locked is None:
-            packages = self._dependency_cache.search_for(dependency)
+            packages = self._dependency_cache.search_for(
+                dependency, self._solution.decision_level
+            )
             package = next(iter(packages), None)
 
             if package is None:
